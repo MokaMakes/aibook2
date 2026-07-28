@@ -1,81 +1,103 @@
-import hashlib
-import getpass
+#!/usr/bin/env bash
 
-# In-memory database to store credentials: {username: (hashed_password, salt)}
-user_db = {}
+# File to store user credentials in format: username:hash:salt
+DB_FILE="users.db"
 
-def hash_password(password: str, salt: bytes = None) -> tuple[str, bytes]:
-    """Hashes a password with a salt using SHA-256."""
-    import os
-    if salt is None:
-        salt = os.urandom(16)  # Generate a random 16-byte salt
-    
-    # Combine salt and password, then hash
-    hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
-    return hashed.hex(), salt
+# Ensure database file exists with restricted permissions
+if [ ! -f "$DB_FILE" ]; then
+    touch "$DB_FILE"
+    chmod 600 "$DB_FILE"
+fi
 
-def register():
-    print("\n--- User Registration ---")
-    username = input("Enter a username: ").strip().lower()
-    
-    if not username:
-        print("Username cannot be empty.")
+hash_password() {
+    local pass="$1"
+    local salt="$2"
+    # PBKDF2 with SHA256 and 10,000 iterations
+    openssl kdf -keylen 32 -kdfopt digest:SHA256 -kdfopt pass:"$pass" -kdfopt salt:"$salt" -kdfopt iter:10000 PBKDF2 2>/dev/null | xxd -p | tr -d '\n'
+}
+
+register_user() {
+    echo -e "\n=== User Registration ==="
+    read -rp "Enter username: " username
+
+    if [ -z "$username" ]; then
+        echo "Username cannot be empty."
         return
-        
-    if username in user_db:
-        print("Username already exists! Please try logging in.")
-        return
-    
-    password = getpass.getpass("Enter a password: ")
-    confirm_password = getpass.getpass("Confirm password: ")
-    
-    if password != confirm_password:
-        print("Passwords do not match!")
-        return
-        
-    if len(password) < 6:
-        print("Password must be at least 6 characters long.")
-        return
-    
-    # Hash password and save to database
-    hashed_pwd, salt = hash_password(password)
-    user_db[username] = (hashed_pwd, salt)
-    print(f"Account created successfully for '{username}'!")
+    fi
 
-def login():
-    print("\n--- User Login ---")
-    username = input("Enter username: ").strip().lower()
-    password = getpass.getpass("Enter password: ")
-    
-    if username not in user_db:
-        print("Invalid username or password.")
+    # Check if username exists
+    if grep -q "^${username}:" "$DB_FILE"; then
+        echo "Error: Username already exists."
         return
-    
-    stored_hash, salt = user_db[username]
-    input_hash, _ = hash_password(password, salt)
-    
-    if input_hash == stored_hash:
-        print(f"\nWelcome back, {username}! Access granted.")
-    else:
-        print("Invalid username or password.")
+    fi
 
-def main():
-    while True:
-        print("\n=== Welcome Menu ===")
-        print("1. Register")
-        print("2. Login")
-        print("3. Exit")
-        choice = input("Select an option (1-3): ").strip()
-        
-        if choice == '1':
-            register()
-        elif choice == '2':
-            login()
-        elif choice == '3':
-            print("Goodbye!")
-            break
-        else:
-            print("Invalid selection. Please choose 1, 2, or 3.")
+    read -rsp "Enter password: " password
+    echo
+    read -rsp "Confirm password: " password_confirm
+    echo
 
-if __name__ == "__main__":
-    main()
+    if [ "$password" != "$password_confirm" ]; then
+        echo "Error: Passwords do not match."
+        return
+    fi
+
+    if [ ${#password} -lt 6 ]; then
+        echo "Error: Password must be at least 6 characters long."
+        return
+    fi
+
+    # Generate a random 16-byte hex salt
+    salt=$(openssl rand -hex 16)
+    hashed_pass=$(hash_password "$password" "$salt")
+
+    # Store credentials
+    echo "${username}:${hashed_pass}:${salt}" >> "$DB_FILE"
+    echo "Account created successfully for '$username'!"
+}
+
+login_user() {
+    echo -e "\n=== User Login ==="
+    read -rp "Enter username: " username
+    read -rsp "Enter password: " password
+    echo
+
+    # Find user record
+    user_row=$(grep "^${username}:" "$DB_FILE")
+
+    if [ -z "$user_row" ]; then
+        echo "Error: Invalid username or password."
+        return
+    fi
+
+    # Extract stored hash and salt
+    stored_hash=$(echo "$user_row" | cut -d':' -f2)
+    stored_salt=$(echo "$user_row" | cut -d':' -f3)
+
+    # Hash the provided password with the stored salt
+    input_hash=$(hash_password "$password" "$stored_salt")
+
+    if [ "$input_hash" = "$stored_hash" ]; then
+        echo "Welcome back, $username! Access granted."
+    else
+        echo "Error: Invalid username or password."
+    fi
+}
+
+main() {
+    while true; do
+        echo -e "\n===================="
+        echo "1) Register"
+        echo "2) Login"
+        echo "3) Exit"
+        read -rp "Choose an option (1-3): " choice
+
+        case "$choice" in
+            1) register_user ;;
+            2) login_user ;;
+            3) echo "Goodbye!"; exit 0 ;;
+            *) echo "Invalid option. Please try again." ;;
+        esac
+    done
+}
+
+main
